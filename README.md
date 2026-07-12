@@ -233,6 +233,13 @@ domain/prefix across many crawls. Both return the same capture shape.
 
 ## Library usage
 
+A complete, runnable version of the snippet below lives at
+[`crates/ccdl/examples/enumerate.rs`](./crates/ccdl/examples/enumerate.rs):
+
+```bash
+cargo run --example enumerate -- 'en.wikipedia.org/wiki/'
+```
+
 ```rust
 use ccdl::prelude::*;
 use ccdl::model::crawl::CrawlSelector;
@@ -244,7 +251,7 @@ let ccdl = Ccdl::builder()
     .max_rps(2)
     .build()?;
 
-let query = UrlQuery::prefix("digikey.com/en/products/detail")
+let query = UrlQuery::prefix("en.wikipedia.org/wiki/")
     .status(200)
     .crawls(CrawlSelector::LatestN(4));
 
