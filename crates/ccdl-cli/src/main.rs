@@ -104,6 +104,11 @@ enum Command {
         /// The URL to fetch.
         url: String,
     },
+    /// Discover sitemap seed URLs for a host from Common Crawl captures.
+    Sitemap {
+        /// The host, e.g. `www.digikey.com`.
+        host: String,
+    },
     /// Build a sampled manifest for a URL pattern.
     Manifest {
         /// URL pattern.
@@ -128,6 +133,9 @@ enum Command {
         /// Deduplicate by url key.
         #[arg(long)]
         distinct: bool,
+        /// Stop after this many records; emits a resume token on exhaustion.
+        #[arg(long)]
+        budget_records: Option<u64>,
         /// Bind a URL template, e.g. `host/manufacturer/{name}/{part}`.
         #[arg(long)]
         template: Option<String>,
@@ -163,7 +171,7 @@ fn parse_match(s: &str) -> MatchType {
 
 fn exit_for(err: &Error) -> ExitCode {
     match err {
-        Error::RateLimited { .. } => ExitCode::from(3),
+        Error::RateLimited { .. } | Error::BudgetExhausted { .. } => ExitCode::from(3),
         Error::IndexTooLarge { .. } => ExitCode::from(4),
         Error::Config(_) => ExitCode::from(2),
         _ => ExitCode::FAILURE,
@@ -182,6 +190,7 @@ async fn main() -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run(cli: Cli) -> Result<(), Error> {
     let selector: CrawlSelector = match &cli.crawls {
         Some(s) => s.parse()?,
@@ -226,11 +235,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
                     _ => Some(Collapse::Digest),
                 };
             }
-            if dry_run {
-                return dump_urls(&client, &q).await;
-            }
-            let stream = client.search(q).await?;
-            write_stream(stream, format).await
+            cmd_search(&client, q, dry_run, format).await
         }
         Command::Text { url } => {
             let text = client.text(&url).await?;
@@ -255,11 +260,19 @@ async fn run(cli: Cli) -> Result<(), Error> {
             }
             Ok(())
         }
+        Command::Sitemap { host } => {
+            let seeds = client.sitemap_seeds(&host, selector).await?;
+            for url in seeds {
+                println!("{url}");
+            }
+            Ok(())
+        }
         Command::Enumerate {
             pattern,
             r#match,
             status,
             distinct,
+            budget_records,
             template,
             #[cfg(feature = "table")]
             bulk,
@@ -270,6 +283,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 match_str: r#match,
                 status,
                 distinct,
+                budget_records,
                 template,
                 #[cfg(feature = "table")]
                 bulk,
@@ -287,6 +301,7 @@ struct EnumOpts {
     match_str: String,
     status: Option<u16>,
     distinct: bool,
+    budget_records: Option<u64>,
     template: Option<String>,
     #[cfg(feature = "table")]
     bulk: bool,
@@ -324,7 +339,12 @@ async fn cmd_enumerate(client: &Ccdl, o: EnumOpts) -> Result<(), Error> {
     if o.dry_run {
         return dump_urls(client, b.query()).await;
     }
-    write_stream(b.run().await?, o.format).await
+    let stream = b.run().await?;
+    let budget = ccdl::budget::Budget {
+        max_records: o.budget_records,
+        ..Default::default()
+    };
+    write_stream(budget.apply(stream), o.format).await
 }
 
 fn base_query(pattern: String, match_str: &str, crawls: CrawlSelector) -> UrlQuery {
@@ -338,6 +358,18 @@ fn base_query(pattern: String, match_str: &str, crawls: CrawlSelector) -> UrlQue
         time_range: None,
         limit: None,
     }
+}
+
+async fn cmd_search(
+    client: &Ccdl,
+    q: UrlQuery,
+    dry_run: bool,
+    format: Format,
+) -> Result<(), Error> {
+    if dry_run {
+        return dump_urls(client, &q).await;
+    }
+    write_stream(client.search(q).await?, format).await
 }
 
 async fn cmd_crawls(client: &Ccdl, refresh: bool) -> Result<(), Error> {

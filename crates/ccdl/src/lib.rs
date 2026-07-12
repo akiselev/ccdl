@@ -15,6 +15,8 @@ pub mod cache;
 
 pub mod polite;
 
+pub mod budget;
+pub mod discover;
 pub mod http;
 pub mod registry;
 

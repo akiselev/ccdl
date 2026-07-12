@@ -166,6 +166,38 @@ impl Ccdl {
         table.search(crawls, query).await
     }
 
+    /// Discover sitemap seed URLs for a host from its captured `robots.txt`
+    /// and `sitemap.xml`. Returns the union of `<loc>` entries found.
+    #[cfg(feature = "warc")]
+    pub async fn sitemap_seeds(&self, host: &str, crawls: CrawlSelector) -> Result<Vec<String>> {
+        let host = host.trim_end_matches('/');
+        let mut seeds = Vec::new();
+
+        // robots.txt may point at one or more sitemaps. The sitemap URLs are
+        // themselves seeds; if their content is archived, expand `<loc>` too.
+        if let Ok(robots) = self
+            .text_in(&format!("https://{host}/robots.txt"), crawls.clone())
+            .await
+        {
+            for sm in crate::discover::parse_robots_sitemaps(&robots) {
+                if let Ok(xml) = self.text_in(&sm, crawls.clone()).await {
+                    seeds.extend(crate::discover::parse_sitemap(&xml));
+                }
+                seeds.push(sm);
+            }
+        }
+        // Fall back to the conventional sitemap.xml location.
+        if let Ok(xml) = self
+            .text_in(&format!("https://{host}/sitemap.xml"), crawls)
+            .await
+        {
+            seeds.extend(crate::discover::parse_sitemap(&xml));
+        }
+        seeds.sort();
+        seeds.dedup();
+        Ok(seeds)
+    }
+
     /// Build a manifest for a query, applying a sampling policy per URL.
     ///
     /// This buffers the full result to group and sample by `urlkey`; use
@@ -236,7 +268,13 @@ impl Ccdl {
     /// Resolve the newest 200 capture for a URL and return its decoded text.
     #[cfg(feature = "warc")]
     pub async fn text(&self, url: &str) -> Result<String> {
-        let query = UrlQuery::exact(url).status(200).crawls(CrawlSelector::All);
+        self.text_in(url, CrawlSelector::All).await
+    }
+
+    /// Like [`Ccdl::text`], but restricted to a crawl selector.
+    #[cfg(feature = "warc")]
+    pub async fn text_in(&self, url: &str, crawls: CrawlSelector) -> Result<String> {
+        let query = UrlQuery::exact(url).status(200).crawls(crawls);
         let mut stream = self.search(query).await?;
         let mut newest: Option<crate::model::capture::Capture> = None;
         while let Some(item) = stream.next().await {

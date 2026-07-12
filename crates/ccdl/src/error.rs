@@ -60,6 +60,13 @@ pub enum Error {
     /// A network/transport error.
     #[error("network error: {0}")]
     Network(String),
+
+    /// A run hit its configured budget; carries a resume token for the next run.
+    #[error("budget exhausted (resume: {resume})")]
+    BudgetExhausted {
+        /// A token identifying where to resume (last emitted capture key).
+        resume: String,
+    },
 }
 
 impl From<reqwest::Error> for Error {
