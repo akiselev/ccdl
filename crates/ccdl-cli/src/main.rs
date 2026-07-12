@@ -88,6 +88,22 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Fetch a URL's captured content (or `@manifest.ndjson` of captures).
+    Fetch {
+        /// A URL, or `@file.ndjson` / `@-` to stream captures from NDJSON.
+        target: String,
+        /// Write payloads into this directory (digest-named files).
+        #[arg(long)]
+        out: Option<String>,
+        /// Print decoded text to stdout instead of writing files.
+        #[arg(long)]
+        text: bool,
+    },
+    /// Resolve the newest 200 capture of a URL and print its decoded text.
+    Text {
+        /// The URL to fetch.
+        url: String,
+    },
     /// Enumerate captures for a URL pattern.
     Enumerate {
         /// URL pattern.
@@ -187,6 +203,14 @@ async fn run(cli: Cli) -> Result<(), Error> {
             let stream = client.search(q).await?;
             write_stream(stream, format).await
         }
+        Command::Text { url } => {
+            let text = client.text(&url).await?;
+            println!("{text}");
+            Ok(())
+        }
+        Command::Fetch { target, out, text } => {
+            cmd_fetch(&client, &target, out.as_deref(), text).await
+        }
         Command::Enumerate {
             pattern,
             r#match,
@@ -234,6 +258,70 @@ async fn cmd_crawls(client: &Ccdl, refresh: bool) -> Result<(), Error> {
     for c in client.crawls().await? {
         let _ = writeln!(out, "{}\t{}", c.id, c.name);
     }
+    Ok(())
+}
+
+async fn cmd_fetch(
+    client: &Ccdl,
+    target: &str,
+    out: Option<&str>,
+    text: bool,
+) -> Result<(), Error> {
+    if let Some(path) = target.strip_prefix('@') {
+        let content = if path == "-" {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+            buf
+        } else {
+            std::fs::read_to_string(path)?
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let cap: ccdl::model::capture::Capture =
+                serde_json::from_str(line).map_err(|e| Error::Parse(e.to_string()))?;
+            fetch_one(client, &cap, out, text).await?;
+        }
+        Ok(())
+    } else {
+        // A bare URL: resolve newest 200 capture across all crawls.
+        let http = client.fetch_url(target, CrawlSelector::All).await?;
+        if text {
+            println!("{}", http.text()?);
+        } else if let Some(dir) = out {
+            write_payload(dir, target, &http.decoded_body()?)?;
+        } else {
+            print!("{}", http.text()?);
+        }
+        Ok(())
+    }
+}
+
+async fn fetch_one(
+    client: &Ccdl,
+    cap: &ccdl::model::capture::Capture,
+    out: Option<&str>,
+    text: bool,
+) -> Result<(), Error> {
+    let http = client.fetch_http(cap).await?;
+    if text {
+        println!("{}", http.text()?);
+    } else if let Some(dir) = out {
+        let name = cap.digest.replace(':', "_");
+        write_payload(dir, &name, &http.decoded_body()?)?;
+    } else {
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), &http.decoded_body()?);
+    }
+    Ok(())
+}
+
+fn write_payload(dir: &str, name: &str, bytes: &[u8]) -> Result<(), Error> {
+    std::fs::create_dir_all(dir)?;
+    let safe = name.replace(['/', ':', '?', '&', '='], "_");
+    let path = std::path::Path::new(dir).join(safe);
+    std::fs::write(path, bytes)?;
     Ok(())
 }
 

@@ -94,10 +94,14 @@ impl CcdlBuilder {
             Arc::new(HttpTransport::new(polite.clone(), cache.clone())?);
         let registry = Arc::new(Registry::new(transport.clone()));
         let index = IndexClient::new(transport.clone());
+        #[cfg(feature = "warc")]
+        let warc = crate::warc::WarcClient::new(transport.clone(), cache.clone());
         Ok(Ccdl {
             registry,
             index,
             transport,
+            #[cfg(feature = "warc")]
+            warc,
         })
     }
 }
@@ -107,6 +111,8 @@ pub struct Ccdl {
     registry: Arc<Registry>,
     index: IndexClient,
     transport: Arc<dyn Transport>,
+    #[cfg(feature = "warc")]
+    warc: crate::warc::WarcClient,
 }
 
 impl Ccdl {
@@ -147,6 +153,56 @@ impl Ccdl {
     pub async fn stats(&self, query: &UrlQuery) -> Result<Estimate> {
         let crawls = self.resolve(&query.crawls).await?;
         self.index.count(&crawls, query).await
+    }
+
+    /// Fetch and parse a capture's WARC record (payload cached by digest).
+    #[cfg(feature = "warc")]
+    pub async fn fetch(
+        &self,
+        capture: &crate::model::capture::Capture,
+    ) -> Result<crate::warc::WarcRecord> {
+        self.warc.fetch(capture).await
+    }
+
+    /// Fetch a capture and parse the enclosed HTTP response.
+    #[cfg(feature = "warc")]
+    pub async fn fetch_http(
+        &self,
+        capture: &crate::model::capture::Capture,
+    ) -> Result<crate::warc::HttpCapture> {
+        self.warc.fetch_http(capture).await
+    }
+
+    /// Resolve the newest 200 capture for a URL and return its decoded text.
+    #[cfg(feature = "warc")]
+    pub async fn text(&self, url: &str) -> Result<String> {
+        let query = UrlQuery::exact(url).status(200).crawls(CrawlSelector::All);
+        let mut stream = self.search(query).await?;
+        let mut newest: Option<crate::model::capture::Capture> = None;
+        while let Some(item) = stream.next().await {
+            let cap = item?;
+            if newest.as_ref().is_none_or(|n| cap.timestamp > n.timestamp) {
+                newest = Some(cap);
+            }
+        }
+        let capture = newest.ok_or(Error::NotFound)?;
+        self.fetch_http(&capture).await?.text()
+    }
+
+    /// Fetch a URL from a specific crawl selector, returning the HTTP capture.
+    #[cfg(feature = "warc")]
+    pub async fn fetch_url(
+        &self,
+        url: &str,
+        crawls: CrawlSelector,
+    ) -> Result<crate::warc::HttpCapture> {
+        let query = UrlQuery::exact(url).status(200).crawls(crawls);
+        let mut stream = self.search(query).await?;
+        let cap = match stream.next().await {
+            Some(item) => item?,
+            None => return Err(Error::NotFound),
+        };
+        self.fetch_http(&cap).await
     }
 
     /// Begin an enumeration for a pattern.
