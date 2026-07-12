@@ -358,6 +358,17 @@ impl EnumerateBuilder<'_> {
         self
     }
 
+    /// Restrict to captures within an inclusive time range.
+    #[must_use]
+    pub fn time_range(
+        mut self,
+        from: chrono::DateTime<chrono::Utc>,
+        to: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        self.query = self.query.time_range(from, to);
+        self
+    }
+
     /// The compiled query (for `--dry-run`).
     #[must_use]
     pub fn query(&self) -> &UrlQuery {

@@ -28,9 +28,25 @@ struct Cli {
     #[arg(long, global = true, default_value_t = 2)]
     max_rps: u32,
 
-    /// Crawl selector (e.g. `latest-4`, `2020..2024`, `all`).
+    /// Crawl selector (e.g. `latest-4`, `2020..2024`, `all`, `since:3d`).
     #[arg(long, global = true)]
     crawls: Option<String>,
+
+    /// Only captures at/after this time (e.g. `2021-06-01`, `3 days ago`, `6mo`).
+    #[arg(long, global = true)]
+    from: Option<String>,
+
+    /// Only captures at/before this time (same formats as `--from`).
+    #[arg(long, global = true)]
+    to: Option<String>,
+
+    /// Keep only the single newest matching capture per query.
+    #[arg(long, global = true)]
+    newest: bool,
+
+    /// Keep only the single oldest matching capture per query.
+    #[arg(long, global = true)]
+    oldest: bool,
 
     /// Output format: ndjson|csv|table.
     #[arg(short, long, global = true, default_value = "ndjson")]
@@ -149,6 +165,30 @@ enum Command {
     },
 }
 
+/// How to reduce a result stream to a single capture, if requested.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reduce {
+    None,
+    Newest,
+    Oldest,
+}
+
+/// Parse `--from`/`--to` into an inclusive time range, defaulting the open side.
+fn parse_time_range(from: Option<&str>, to: Option<&str>) -> Result<TimeRange, Error> {
+    if from.is_none() && to.is_none() {
+        return Ok(None);
+    }
+    let lo = match from {
+        Some(s) => ccdl::model::timespec::parse(s)?,
+        None => chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
+    };
+    let hi = match to {
+        Some(s) => ccdl::model::timespec::parse(s)?,
+        None => chrono::Utc::now(),
+    };
+    Ok(Some((lo, hi)))
+}
+
 fn parse_sampling(s: &str) -> ccdl::model::manifest::Sampling {
     use ccdl::model::manifest::Sampling;
     match s {
@@ -197,6 +237,14 @@ async fn run(cli: Cli) -> Result<(), Error> {
         None => CrawlSelector::Latest,
     };
     let format = Format::parse(&cli.output);
+    let time_range = parse_time_range(cli.from.as_deref(), cli.to.as_deref())?;
+    let reduce = if cli.newest {
+        Reduce::Newest
+    } else if cli.oldest {
+        Reduce::Oldest
+    } else {
+        Reduce::None
+    };
 
     let mut builder = Ccdl::builder()
         .max_rps(cli.max_rps)
@@ -209,7 +257,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
     match cli.command {
         Command::Crawls { refresh } => cmd_crawls(&client, refresh).await,
         Command::Stats { pattern, r#match } => {
-            let q = base_query(pattern, &r#match, selector);
+            let q = base_query(pattern, &r#match, selector, time_range);
             let est = client.stats(&q).await?;
             println!("{{\"pages\":{}}}", est.pages);
             Ok(())
@@ -222,7 +270,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             collapse,
             dry_run,
         } => {
-            let mut q = base_query(pattern, &r#match, selector);
+            let mut q = base_query(pattern, &r#match, selector, time_range);
             if let Some(s) = status {
                 q = q.status(s);
             }
@@ -235,7 +283,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
                     _ => Some(Collapse::Digest),
                 };
             }
-            cmd_search(&client, q, dry_run, format).await
+            cmd_search(&client, q, dry_run, format, reduce).await
         }
         Command::Text { url } => {
             let text = client.text(&url).await?;
@@ -250,7 +298,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             r#match,
             sample,
         } => {
-            let q = base_query(pattern, &r#match, selector);
+            let q = base_query(pattern, &r#match, selector, time_range);
             let manifest = client.manifest(q, parse_sampling(&sample)).await?;
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
@@ -289,6 +337,8 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 bulk,
                 dry_run,
                 selector,
+                time_range,
+                reduce,
                 format,
             };
             cmd_enumerate(&client, opts).await
@@ -307,6 +357,8 @@ struct EnumOpts {
     bulk: bool,
     dry_run: bool,
     selector: CrawlSelector,
+    time_range: TimeRange,
+    reduce: Reduce,
     format: Format,
 }
 
@@ -321,15 +373,18 @@ async fn cmd_enumerate(client: &Ccdl, o: EnumOpts) -> Result<(), Error> {
     }
     #[cfg(feature = "table")]
     if o.bulk {
-        let q = base_query(o.pattern, &o.match_str, o.selector);
+        let q = base_query(o.pattern, &o.match_str, o.selector, o.time_range);
         if o.dry_run {
             return dump_urls(client, &q).await;
         }
-        return write_stream(client.bulk(q).await?, o.format).await;
+        return write_stream(client.bulk(q).await?, o.format, o.reduce).await;
     }
     let mut b = client
         .enumerate(o.pattern, parse_match(&o.match_str))
         .crawls(o.selector);
+    if let Some((from, to)) = o.time_range {
+        b = b.time_range(from, to);
+    }
     if let Some(s) = o.status {
         b = b.status(s);
     }
@@ -344,10 +399,17 @@ async fn cmd_enumerate(client: &Ccdl, o: EnumOpts) -> Result<(), Error> {
         max_records: o.budget_records,
         ..Default::default()
     };
-    write_stream(budget.apply(stream), o.format).await
+    write_stream(budget.apply(stream), o.format, o.reduce).await
 }
 
-fn base_query(pattern: String, match_str: &str, crawls: CrawlSelector) -> UrlQuery {
+type TimeRange = Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>;
+
+fn base_query(
+    pattern: String,
+    match_str: &str,
+    crawls: CrawlSelector,
+    time_range: TimeRange,
+) -> UrlQuery {
     UrlQuery {
         pattern,
         match_type: parse_match(match_str),
@@ -355,7 +417,7 @@ fn base_query(pattern: String, match_str: &str, crawls: CrawlSelector) -> UrlQue
         filters: vec![],
         collapse: None,
         fields: None,
-        time_range: None,
+        time_range,
         limit: None,
     }
 }
@@ -365,11 +427,12 @@ async fn cmd_search(
     q: UrlQuery,
     dry_run: bool,
     format: Format,
+    reduce: Reduce,
 ) -> Result<(), Error> {
     if dry_run {
         return dump_urls(client, &q).await;
     }
-    write_stream(client.search(q).await?, format).await
+    write_stream(client.search(q).await?, format, reduce).await
 }
 
 async fn cmd_crawls(client: &Ccdl, refresh: bool) -> Result<(), Error> {
@@ -455,12 +518,38 @@ async fn dump_urls(client: &Ccdl, q: &UrlQuery) -> Result<(), Error> {
     Ok(())
 }
 
-async fn write_stream(mut stream: ccdl::index::CaptureStream, format: Format) -> Result<(), Error> {
+async fn write_stream(
+    mut stream: ccdl::index::CaptureStream,
+    format: Format,
+    reduce: Reduce,
+) -> Result<(), Error> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut writer = Writer::new(format);
+
+    if reduce == Reduce::None {
+        while let Some(item) = stream.next().await {
+            let cap = item?;
+            let _ = writer.write(&mut out, &cap);
+        }
+        return Ok(());
+    }
+
+    // Newest/oldest: keep a single capture by timestamp.
+    let mut chosen: Option<ccdl::model::capture::Capture> = None;
     while let Some(item) = stream.next().await {
         let cap = item?;
+        let keep = match (&chosen, reduce) {
+            (None, _) => true,
+            (Some(c), Reduce::Newest) => cap.timestamp > c.timestamp,
+            (Some(c), Reduce::Oldest) => cap.timestamp < c.timestamp,
+            (Some(_), Reduce::None) => false,
+        };
+        if keep {
+            chosen = Some(cap);
+        }
+    }
+    if let Some(cap) = chosen {
         let _ = writer.write(&mut out, &cap);
     }
     Ok(())

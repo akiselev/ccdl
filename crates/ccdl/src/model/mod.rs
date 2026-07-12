@@ -6,6 +6,7 @@ pub mod manifest;
 pub mod query;
 pub mod sampling;
 pub mod template;
+pub mod timespec;
 
 pub use capture::Capture;
 pub use crawl::{CrawlId, CrawlSelector};

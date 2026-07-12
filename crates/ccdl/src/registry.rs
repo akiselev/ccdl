@@ -48,6 +48,22 @@ impl CrawlInfo {
             }
         })
     }
+
+    /// The crawl's coverage-end instant, parsed from `collinfo`'s `to` field.
+    #[must_use]
+    pub fn end_date(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.to
+            .as_deref()
+            .and_then(|s| crate::model::timespec::parse(s).ok())
+    }
+
+    /// The crawl's coverage-start instant, parsed from `collinfo`'s `from`.
+    #[must_use]
+    pub fn start_date(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.from
+            .as_deref()
+            .and_then(|s| crate::model::timespec::parse(s).ok())
+    }
 }
 
 /// Loads, caches, and resolves crawl selectors.
@@ -126,11 +142,16 @@ impl Registry {
                 .cloned()
                 .collect(),
             CrawlSelector::Since(date) => {
-                let from_year =
-                    u16::try_from(date.format("%Y").to_string().parse::<i32>().unwrap_or(0))
-                        .unwrap_or(0);
+                let since_year = crate::model::timespec::year_of(*date);
                 all.iter()
-                    .filter(|c| c.year().is_some_and(|y| y >= from_year))
+                    .filter(|c| {
+                        // Prefer the crawl's real coverage end; fall back to the
+                        // id's year when `collinfo` omits/garbles the `to` field.
+                        c.end_date().map_or_else(
+                            || c.year().is_some_and(|y| y >= since_year),
+                            |end| end >= *date,
+                        )
+                    })
                     .cloned()
                     .collect()
             }
@@ -141,14 +162,25 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn fixture() -> Vec<CrawlInfo> {
         let json = serde_json::json!([
-            {"id":"CC-MAIN-2026-30","name":"July 2026","cdx-api":"https://index.commoncrawl.org/CC-MAIN-2026-30-index"},
-            {"id":"CC-MAIN-2023-10","name":"March 2023","cdx-api":"https://index.commoncrawl.org/CC-MAIN-2023-10-index"},
-            {"id":"CC-MAIN-2020-05","name":"Jan 2020","cdx-api":"https://index.commoncrawl.org/CC-MAIN-2020-05-index"}
+            {"id":"CC-MAIN-2026-30","name":"July 2026","cdx-api":"https://index.commoncrawl.org/CC-MAIN-2026-30-index","from":"2026-07-01T00:00:00","to":"2026-07-14T00:00:00"},
+            {"id":"CC-MAIN-2023-10","name":"March 2023","cdx-api":"https://index.commoncrawl.org/CC-MAIN-2023-10-index","from":"2023-03-01T00:00:00","to":"2023-03-14T00:00:00"},
+            {"id":"CC-MAIN-2020-05","name":"Jan 2020","cdx-api":"https://index.commoncrawl.org/CC-MAIN-2020-05-index","from":"2020-01-01T00:00:00","to":"2020-01-28T00:00:00"}
         ]);
         Registry::parse(&json).unwrap()
+    }
+
+    #[test]
+    fn resolve_since_uses_coverage_end() {
+        let all = fixture();
+        let since = chrono::Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let r = Registry::resolve_in(&all, &CrawlSelector::Since(since));
+        // 2026 and 2023 crawls end after 2023-01-01; 2020 does not.
+        assert_eq!(r.len(), 2);
+        assert!(r.iter().all(|c| c.id.0 != "CC-MAIN-2020-05"));
     }
 
     #[test]

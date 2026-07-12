@@ -35,8 +35,8 @@ pub enum CrawlSelector {
     LatestN(usize),
     /// An explicit list of crawl ids.
     Ids(Vec<CrawlId>),
-    /// Crawls whose end date is on or after the given date.
-    Since(chrono::NaiveDate),
+    /// Crawls whose coverage ends on or after the given instant.
+    Since(chrono::DateTime<chrono::Utc>),
     /// Crawls whose year falls within `[from, to]` inclusive.
     YearRange {
         /// First year (inclusive).
@@ -56,7 +56,7 @@ impl fmt::Display for CrawlSelector {
                 let joined: Vec<_> = ids.iter().map(|i| i.0.as_str()).collect();
                 f.write_str(&joined.join(","))
             }
-            CrawlSelector::Since(d) => write!(f, "since:{d}"),
+            CrawlSelector::Since(d) => write!(f, "since:{}", d.format("%Y-%m-%d")),
             CrawlSelector::YearRange { from, to } => write!(f, "{from}..{to}"),
         }
     }
@@ -80,9 +80,7 @@ impl FromStr for CrawlSelector {
             return Ok(CrawlSelector::LatestN(n));
         }
         if let Some(rest) = s.strip_prefix("since:") {
-            let d = rest
-                .parse::<chrono::NaiveDate>()
-                .map_err(|_| Error::Config(format!("invalid since date: {rest}")))?;
+            let d = super::timespec::parse(rest)?;
             return Ok(CrawlSelector::Since(d));
         }
         if let Some((a, b)) = s.split_once("..") {
@@ -124,8 +122,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_since() {
-        let sel: CrawlSelector = "since:2021-01-01".parse().unwrap();
-        assert!(matches!(sel, CrawlSelector::Since(_)));
+    fn parse_since_absolute_and_relative() {
+        assert!(matches!(
+            "since:2021-01-01".parse::<CrawlSelector>().unwrap(),
+            CrawlSelector::Since(_)
+        ));
+        assert!(matches!(
+            "since:3 days ago".parse::<CrawlSelector>().unwrap(),
+            CrawlSelector::Since(_)
+        ));
+        assert!(matches!(
+            "since:6mo".parse::<CrawlSelector>().unwrap(),
+            CrawlSelector::Since(_)
+        ));
     }
 }
