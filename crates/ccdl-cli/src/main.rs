@@ -150,32 +150,12 @@ async fn run(cli: Cli) -> Result<(), Error> {
     if let Some(dir) = &cli.cache_dir {
         builder = builder.cache_dir(dir);
     }
+    let client = builder.build()?;
 
     match cli.command {
-        Command::Crawls { refresh } => {
-            let client = builder.build()?;
-            if refresh {
-                client.registry().refresh().await?;
-            }
-            let stdout = std::io::stdout();
-            let mut out = stdout.lock();
-            for c in client.crawls().await? {
-                let _ = writeln!(out, "{}\t{}", c.id, c.name);
-            }
-            Ok(())
-        }
+        Command::Crawls { refresh } => cmd_crawls(&client, refresh).await,
         Command::Stats { pattern, r#match } => {
-            let client = builder.build()?;
-            let q = UrlQuery {
-                pattern,
-                match_type: parse_match(&r#match),
-                crawls: selector,
-                filters: vec![],
-                collapse: None,
-                fields: None,
-                time_range: None,
-                limit: None,
-            };
+            let q = base_query(pattern, &r#match, selector);
             let est = client.stats(&q).await?;
             println!("{{\"pages\":{}}}", est.pages);
             Ok(())
@@ -188,16 +168,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             collapse,
             dry_run,
         } => {
-            let mut q = UrlQuery {
-                pattern,
-                match_type: parse_match(&r#match),
-                crawls: selector,
-                filters: vec![],
-                collapse: None,
-                fields: None,
-                time_range: None,
-                limit: None,
-            };
+            let mut q = base_query(pattern, &r#match, selector);
             if let Some(s) = status {
                 q = q.status(s);
             }
@@ -211,13 +182,8 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 };
             }
             if dry_run {
-                let client = builder.build()?;
-                for crawl in client.registry().resolve(&q.crawls).await? {
-                    println!("{}", ccdl::index::compile_cdx_url(&crawl, &q, &[]));
-                }
-                return Ok(());
+                return dump_urls(&client, &q).await;
             }
-            let client = builder.build()?;
             let stream = client.search(q).await?;
             write_stream(stream, format).await
         }
@@ -228,7 +194,6 @@ async fn run(cli: Cli) -> Result<(), Error> {
             distinct,
             dry_run,
         } => {
-            let client = builder.build()?;
             let mut b = client
                 .enumerate(pattern, parse_match(&r#match))
                 .crawls(selector);
@@ -239,15 +204,44 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 b = b.distinct_urls();
             }
             if dry_run {
-                for crawl in client.registry().resolve(&b.query().crawls).await? {
-                    println!("{}", ccdl::index::compile_cdx_url(&crawl, b.query(), &[]));
-                }
-                return Ok(());
+                return dump_urls(&client, b.query()).await;
             }
             let stream = b.run().await?;
             write_stream(stream, format).await
         }
     }
+}
+
+fn base_query(pattern: String, match_str: &str, crawls: CrawlSelector) -> UrlQuery {
+    UrlQuery {
+        pattern,
+        match_type: parse_match(match_str),
+        crawls,
+        filters: vec![],
+        collapse: None,
+        fields: None,
+        time_range: None,
+        limit: None,
+    }
+}
+
+async fn cmd_crawls(client: &Ccdl, refresh: bool) -> Result<(), Error> {
+    if refresh {
+        client.registry().refresh().await?;
+    }
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for c in client.crawls().await? {
+        let _ = writeln!(out, "{}\t{}", c.id, c.name);
+    }
+    Ok(())
+}
+
+async fn dump_urls(client: &Ccdl, q: &UrlQuery) -> Result<(), Error> {
+    for crawl in client.registry().resolve(&q.crawls).await? {
+        println!("{}", ccdl::index::compile_cdx_url(&crawl, q, &[]));
+    }
+    Ok(())
 }
 
 async fn write_stream(mut stream: ccdl::index::CaptureStream, format: Format) -> Result<(), Error> {
