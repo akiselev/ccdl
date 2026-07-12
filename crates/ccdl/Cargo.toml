@@ -1,0 +1,48 @@
+[package]
+name = "ccdl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Common Crawl download & enumeration library"
+
+[lints]
+workspace = true
+
+[features]
+default = ["index", "warc", "cache-fs", "rustls"]
+index = []
+warc = ["dep:flate2", "dep:httparse"]
+cache-fs = []
+rustls = []
+table = ["dep:arrow", "dep:parquet", "dep:object_store"]
+athena = ["dep:aws-sdk-athena"]
+moka = ["dep:moka"]
+
+[dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+governor = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+hex = { workspace = true }
+flate2 = { workspace = true, optional = true }
+httparse = { workspace = true, optional = true }
+moka = { workspace = true, optional = true }
+arrow = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
+aws-sdk-athena = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

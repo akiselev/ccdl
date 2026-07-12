@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = ["crates/ccdl", "crates/ccdl-cli"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/akiselev/ccdl"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "time", "io-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+bytes = "1"
+flate2 = "1"
+httparse = "1"
+futures = "0.3"
+async-stream = "0.3"
+governor = "0.6"
+thiserror = "1"
+tracing = "0.1"
+async-trait = "0.1"
+moka = { version = "0.12", features = ["future"] }
+arrow = "53"
+parquet = "53"
+object_store = { version = "0.11", features = ["http"] }
+aws-sdk-athena = "1"
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+hex = "0.4"
+tempfile = "3"
+
+# local
+ccdl = { path = "crates/ccdl" }
