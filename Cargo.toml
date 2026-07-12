@@ -38,7 +38,7 @@ tracing = "0.1"
 async-trait = "0.1"
 moka = { version = "0.12", features = ["future"] }
 arrow = "53"
-parquet = "53"
+parquet = { version = "53", features = ["async", "object_store"] }
 object_store = { version = "0.11", features = ["http"] }
 aws-sdk-athena = "1"
 clap = { version = "4", features = ["derive"] }

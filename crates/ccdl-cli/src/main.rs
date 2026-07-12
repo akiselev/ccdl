@@ -104,6 +104,17 @@ enum Command {
         /// The URL to fetch.
         url: String,
     },
+    /// Build a sampled manifest for a URL pattern.
+    Manifest {
+        /// URL pattern.
+        pattern: String,
+        /// Match type: exact|prefix|host|domain.
+        #[arg(long, default_value = "prefix")]
+        r#match: String,
+        /// Sampling policy: all|unique-digest|first-last|first-last-digest|adaptive.
+        #[arg(long, default_value = "first-last-digest")]
+        sample: String,
+    },
     /// Enumerate captures for a URL pattern.
     Enumerate {
         /// URL pattern.
@@ -117,10 +128,28 @@ enum Command {
         /// Deduplicate by url key.
         #[arg(long)]
         distinct: bool,
+        /// Bind a URL template, e.g. `host/manufacturer/{name}/{part}`.
+        #[arg(long)]
+        template: Option<String>,
+        /// Use the columnar (Parquet) backend instead of CDX.
+        #[cfg(feature = "table")]
+        #[arg(long)]
+        bulk: bool,
         /// Print the compiled query instead of running.
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+fn parse_sampling(s: &str) -> ccdl::model::manifest::Sampling {
+    use ccdl::model::manifest::Sampling;
+    match s {
+        "all" => Sampling::All,
+        "unique-digest" => Sampling::UniqueDigest,
+        "first-last" => Sampling::FirstLast,
+        "adaptive" => Sampling::AdaptiveChangePoint { max_per_url: 8 },
+        _ => Sampling::FirstLastAndDigestChanges,
+    }
 }
 
 fn parse_match(s: &str) -> MatchType {
@@ -211,29 +240,91 @@ async fn run(cli: Cli) -> Result<(), Error> {
         Command::Fetch { target, out, text } => {
             cmd_fetch(&client, &target, out.as_deref(), text).await
         }
+        Command::Manifest {
+            pattern,
+            r#match,
+            sample,
+        } => {
+            let q = base_query(pattern, &r#match, selector);
+            let manifest = client.manifest(q, parse_sampling(&sample)).await?;
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            let mut writer = Writer::new(format);
+            for c in &manifest.captures {
+                let _ = writer.write(&mut out, c);
+            }
+            Ok(())
+        }
         Command::Enumerate {
             pattern,
             r#match,
             status,
             distinct,
+            template,
+            #[cfg(feature = "table")]
+            bulk,
             dry_run,
         } => {
-            let mut b = client
-                .enumerate(pattern, parse_match(&r#match))
-                .crawls(selector);
-            if let Some(s) = status {
-                b = b.status(s);
-            }
-            if distinct {
-                b = b.distinct_urls();
-            }
-            if dry_run {
-                return dump_urls(&client, b.query()).await;
-            }
-            let stream = b.run().await?;
-            write_stream(stream, format).await
+            let opts = EnumOpts {
+                pattern,
+                match_str: r#match,
+                status,
+                distinct,
+                template,
+                #[cfg(feature = "table")]
+                bulk,
+                dry_run,
+                selector,
+                format,
+            };
+            cmd_enumerate(&client, opts).await
         }
     }
+}
+
+struct EnumOpts {
+    pattern: String,
+    match_str: String,
+    status: Option<u16>,
+    distinct: bool,
+    template: Option<String>,
+    #[cfg(feature = "table")]
+    bulk: bool,
+    dry_run: bool,
+    selector: CrawlSelector,
+    format: Format,
+}
+
+async fn cmd_enumerate(client: &Ccdl, o: EnumOpts) -> Result<(), Error> {
+    if let Some(tmpl) = o.template {
+        let t = ccdl::model::template::UrlTemplate::parse(&tmpl)?;
+        for (cap, vars) in client.enumerate_template(&t).await? {
+            let obj = serde_json::json!({ "url": cap.url, "vars": vars });
+            println!("{obj}");
+        }
+        return Ok(());
+    }
+    #[cfg(feature = "table")]
+    if o.bulk {
+        let q = base_query(o.pattern, &o.match_str, o.selector);
+        if o.dry_run {
+            return dump_urls(client, &q).await;
+        }
+        return write_stream(client.bulk(q).await?, o.format).await;
+    }
+    let mut b = client
+        .enumerate(o.pattern, parse_match(&o.match_str))
+        .crawls(o.selector);
+    if let Some(s) = o.status {
+        b = b.status(s);
+    }
+    if o.distinct {
+        b = b.distinct_urls();
+    }
+    if o.dry_run {
+        return dump_urls(client, b.query()).await;
+    }
+    write_stream(b.run().await?, o.format).await
 }
 
 fn base_query(pattern: String, match_str: &str, crawls: CrawlSelector) -> UrlQuery {

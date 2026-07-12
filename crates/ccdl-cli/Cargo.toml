@@ -14,6 +14,10 @@ workspace = true
 name = "ccdl"
 path = "src/main.rs"
 
+[features]
+default = ["table"]
+table = ["ccdl/table"]
+
 [dependencies]
 ccdl = { workspace = true }
 tokio = { workspace = true }

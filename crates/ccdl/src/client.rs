@@ -155,6 +155,66 @@ impl Ccdl {
         self.index.count(&crawls, query).await
     }
 
+    /// Bulk search via the columnar backend (reads cc-index Parquet directly).
+    ///
+    /// Suited to large prefix/domain queries across many crawls; falls back is
+    /// the caller's choice (use [`Ccdl::search`] for CDX).
+    #[cfg(feature = "table")]
+    pub async fn bulk(&self, query: UrlQuery) -> Result<CaptureStream> {
+        let crawls = self.resolve(&query.crawls).await?;
+        let table = crate::table::TableClient::http()?;
+        table.search(crawls, query).await
+    }
+
+    /// Build a manifest for a query, applying a sampling policy per URL.
+    ///
+    /// This buffers the full result to group and sample by `urlkey`; use
+    /// [`Ccdl::search`] for unbounded streaming.
+    pub async fn manifest(
+        &self,
+        query: UrlQuery,
+        sampling: crate::model::manifest::Sampling,
+    ) -> Result<crate::model::manifest::Manifest> {
+        let mut stream = self.search(query.clone()).await?;
+        let mut captures = Vec::new();
+        while let Some(item) = stream.next().await {
+            captures.push(item?);
+        }
+        let sampled = crate::model::sampling::sample(captures, sampling);
+        Ok(crate::model::manifest::Manifest {
+            query,
+            captures: sampled,
+        })
+    }
+
+    /// Enumerate a template's literal prefix and bind each matching URL,
+    /// returning `(capture, vars)` pairs for URLs the template matches.
+    pub async fn enumerate_template(
+        &self,
+        tmpl: &crate::model::template::UrlTemplate,
+    ) -> Result<
+        Vec<(
+            crate::model::capture::Capture,
+            std::collections::BTreeMap<String, String>,
+        )>,
+    > {
+        let query = UrlQuery::prefix(tmpl.prefix());
+        let mut stream = self.search(query).await?;
+        let mut out = Vec::new();
+        while let Some(item) = stream.next().await {
+            let cap = item?;
+            let stripped = cap
+                .url
+                .split_once("://")
+                .map_or(cap.url.as_str(), |(_, rest)| rest);
+            let stripped = stripped.strip_prefix("www.").unwrap_or(stripped);
+            if let Some(vars) = tmpl.bind(stripped) {
+                out.push((cap, vars));
+            }
+        }
+        Ok(out)
+    }
+
     /// Fetch and parse a capture's WARC record (payload cached by digest).
     #[cfg(feature = "warc")]
     pub async fn fetch(
